@@ -4,6 +4,9 @@ out/
 # Local credential overrides (optional; defaults are baked in as constants)
 .env
 
+# Per-device connection settings, generated from camera.env.example
+camera.env
+
 # Vendored third-party repo - tracked separately, not part of this project
 rtsp_authgrinder/
 

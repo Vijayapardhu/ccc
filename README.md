@@ -22,6 +22,8 @@ user store** — the recovered RTSP account is rejected by the web/ISAPI backend
 
 | File | Purpose |
 | --- | --- |
+| `setup.bat` | One-click bootstrap: install/verify FFmpeg + VLC |
+| `start_stream.bat` | One-click live stream in VLC |
 | `cam_stream.py` | Main tool. `wait` / `probe` / `snap` / `record` / `play` / `view` |
 | `rtsp_recover.py` | RFC 2069 digest client; searches default credentials on RTSP |
 | `isapi_login.py` | Tests a credential against the ISAPI endpoints |
@@ -29,10 +31,58 @@ user store** — the recovered RTSP account is rejected by the web/ISAPI backend
 | `verify_rtsp.py` | Verifies a credential and dumps the SDP |
 | `single_check.py` | One-shot auth check; distinguishes IP ban from wrong password |
 
-## Usage
+## Quick start on a new machine
 
-Everything is configured through environment variables, with the discovered
-values as defaults:
+Two double-clicks and you are watching the stream.
+
+1. **`setup.bat`** — verifies Python, installs FFmpeg and VLC via winget,
+   writes `camera.env` from the template. Safe to re-run; anything already
+   present is skipped.
+2. **`start_stream.bat`** — reads `camera.env` and opens the live stream in
+   VLC. Falls back to `ffplay` if VLC is missing.
+
+`setup.bat` needs `winget` (present on Windows 10 1809+ / Windows 11) for the
+FFmpeg and VLC installs. Everything else is detected, not downloaded.
+
+### Dependencies
+
+| Tool | Why | Installed by |
+| --- | --- | --- |
+| Python 3.10+ | runs the scripts | pre-existing; verified by setup |
+| FFmpeg | `snap`, `record`, `play` | winget `Gyan.FFmpeg` |
+| VLC | GUI playback | winget `VideoLAN.VLC` |
+
+**No pip packages are required.** Every script uses only the Python standard
+library and shells out to FFmpeg. `requirements.txt` exists but is entirely
+comments - it lists optional packages (PyAV, OpenCV, NumPy) that you would only
+need if you extend the scripts to decode frames in Python rather than
+delegating to FFmpeg.
+
+### Configuration
+
+`setup.bat` copies `camera.env.example` to `camera.env` on first run. Edit
+`camera.env` to point at a different camera:
+
+```bat
+CAM_HOST=117.196.244.183
+CAM_PORT=554
+CAM_USER=root
+CAM_PASS=1234567890
+CAM_PATH=/Streaming/Channels/101
+```
+
+`camera.env` is gitignored, since it is per-device. The same keys work as
+environment variables for the Python scripts:
+
+```powershell
+$env:CAM_HOST = "117.196.244.183"
+python cam_stream.py snap
+```
+
+## Manual usage
+
+Everything is also configurable through environment variables, with the
+discovered values as defaults:
 
 ```powershell
 $env:CAM_HOST = "117.196.244.183"
@@ -70,6 +120,10 @@ This is *not* a credential problem. `single_check.py` distinguishes the two, and
 
 Do not run the credential search tools in a loop. One pass is enough; a
 successful search still leaves the IP temporarily blocked.
+
+A **different machine on a different network is not affected** by an existing
+ban, since the block is per source IP. Setting up a second device is therefore
+usually the fastest way around a ban on the first.
 
 ## Credential hygiene
 
