@@ -151,20 +151,26 @@ def cmd_record(seconds=10):
     dest = os.path.join(OUT, "recording.mp4")
     url = f"rtsp://{USER}:{PASS}@{HOST}:{PORT}{PATH}"
     print(f"[*] Recording {seconds}s -> {dest}")
+    proc = None
     try:
         proc = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
              "-i", url, "-t", str(seconds), "-c", "copy", "-y", dest],
             capture_output=True, text=True, timeout=int(seconds) + 45)
     except subprocess.TimeoutExpired:
-        pass
+        # proc is never assigned when the timeout fires; treat it as a
+        # transport failure rather than dereferencing it below.
+        print(f"[-] ffmpeg timed out after {seconds + 45}s. The camera likely "
+              f"is not delivering the stream.")
+        return 1
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         size = os.path.getsize(dest)
         print(f"[+] Saved {dest} ({size/1024:.0f} KB)")
         if size < 10000:
             print("[!] File is tiny - stream may not have delivered data.")
         return 0
-    print(f"[-] Record failed: {proc.stderr.strip()[:300]}")
+    detail = proc.stderr.strip()[:300] if proc and proc.stderr else "no error output"
+    print(f"[-] Record failed: {detail}")
     return 1
 
 

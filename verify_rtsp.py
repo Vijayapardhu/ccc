@@ -18,7 +18,7 @@ def md5hex(v):
     return hashlib.md5(v.encode()).hexdigest()
 
 
-def exchange(method, path, auth=None, extra=None, read_sdp=True, attempts=6):
+def exchange(method, path, auth=None, extra=None, attempts=3):
     uri = f"rtsp://{HOST}:{PORT}{path}"
     lines = [f"{method} {uri} RTSP/1.0", "CSeq: 1", "User-Agent: verify/1.0"]
     if method == "DESCRIBE":
@@ -29,7 +29,9 @@ def exchange(method, path, auth=None, extra=None, read_sdp=True, attempts=6):
         lines.append(line)
     raw = ("\r\n".join(lines) + "\r\n\r\n").encode()
 
+    last_exc = None
     for attempt in range(attempts):
+        sock = None
         try:
             sock = socket.create_connection((HOST, PORT), timeout=10)
             sock.settimeout(10)
@@ -53,14 +55,24 @@ def exchange(method, path, auth=None, extra=None, read_sdp=True, attempts=6):
                         clen = int(line.split(":", 1)[1].strip())
                 if len(rest) >= clen:
                     break
-            sock.close()
             if buf.strip():
                 return buf.decode("utf-8", "replace")
         except (ConnectionResetError, ConnectionAbortedError, socket.timeout, OSError) as exc:
-            wait = 2 * (attempt + 1)
-            print(f"    [{method}] {type(exc).__name__}, retry in {wait}s "
-                  f"({attempt + 1}/{attempts})")
-            time.sleep(wait)
+            last_exc = exc
+        finally:
+            # The reset path is the common case here, so the socket must be
+            # released whether or not an exception was raised.
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        # A reset from this device means an IP-level ban, which more traffic
+        # will not clear. Stop instead of burning the remaining attempts.
+        if last_exc is not None:
+            print(f"    [{method}] {type(last_exc).__name__} - connection "
+                  f"refused/reset, treating as banned. Stopping.")
+            break
     return "RTSP/1.0 000 Transport Error"
 
 

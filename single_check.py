@@ -79,5 +79,14 @@ if "200" in raw2:
         print("\n--- SDP ---")
         print(body.strip())
     sys.exit(0)
-print("\n[-] Authenticated request also dropped -> IP-level ban, wait it out.")
+
+# Distinguish the two failure modes: a ban drops the connection before any
+# response, whereas a rejected credential still returns a 401 challenge.
+if not raw2.strip() or "401" not in raw2:
+    print("\n[-] Authenticated request got no 401 challenge -> IP-level ban, wait it out.")
+else:
+    print("\n[-] Still challenging (401) but rejecting the credential.")
+    print("    The IP is NOT banned - this is an account-level rejection:")
+    print("    the password changed, or the account is lockout-flagged from")
+    print("    earlier failed attempts. Changing IP will not clear it.")
 sys.exit(1)

