@@ -1,0 +1,21 @@
+# Captured media and recordings
+out/
+
+# Local credential overrides (optional; defaults are baked in as constants)
+.env
+
+# Vendored third-party repo - tracked separately, not part of this project
+rtsp_authgrinder/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
