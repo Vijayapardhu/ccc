@@ -1,139 +1,171 @@
-# cam
+# campus
 
-Tooling for a **XiongMai "XMEye"** (EZVIZ-branded) IP camera, built while recovering
-access to a unit at `117.196.244.183` and pulling its RTSP stream.
+Student presence tracking across 400+ campus CCTV cameras.
 
-Firmware identified as **V4.0.1 build211217** (web plugin V3.0.7.500).
+Dense-crowd face detection, quality gating, ArcFace embedding, FAISS identity
+search, and multi-frame temporal verification — with DPDP 2023 consent,
+purpose limitation, and erasure built into the data path rather than bolted on.
 
-## What the device looks like
+**Read [ARCHITECTURE.md](ARCHITECTURE.md) first.** It contains the sizing math,
+the tiering recommendation, and the failure modes. The short version: the design
+is organised around one fact — a 4K frame of 200 people does not contain enough
+pixels to identify them, so the system crops instead of resizing, never trusts a
+single frame, and does not run biometrics on cameras that do not need them.
 
-| Surface | Detail |
+---
+
+## Status
+
+| Area | State |
 | --- | --- |
-| Web UI | `http://117.196.244.183/doc/page/login.asp` |
-| RTSP | `:554`, Digest-MD5, per-request rotating nonce, **no `qop`** |
-| ISAPI | `:80`, Digest-MD5 with `qop=auth` |
-| Stream paths | `/Streaming/Channels/101`, `/102`, `/201` |
-| Web login | `m_iAuthType=3` — AES challenge-response via the WebSDK plugin |
+| Tiling, quality gate, alignment | Complete, tested |
+| Temporal verification | Complete, tested |
+| Gallery index (FAISS + NumPy) | Complete, tested |
+| ByteTrack | Complete, tested |
+| DPDP consent / purpose / erasure | Complete, tested |
+| Worker pipeline, bus, API, CLI | Complete |
+| SCRFD / ArcFace wrappers | Written, **untested — needs model weights and a GPU** |
+| Postgres schema | Written, **unapplied** |
+| Cross-camera visit linking | Not started (deliberately out of scope) |
 
-The RTSP and ISAPI layers share a realm (`b462b7e41c0c9b85a726519a`) but **not a
-user store** — the recovered RTSP account is rejected by the web/ISAPI backend.
+151 tests pass on CPU. The inference wrappers are the honest gap: they encode
+real SCRFD DFL decoding and ArcFace preprocessing, but nothing has run them.
+Validate them on real footage before trusting them.
 
-## Scripts
+---
 
-| File | Purpose |
+## Install
+
+```powershell
+python -m pip install -e ".[dev,services,inference,index]"
+```
+
+Model weights (~500MB, not vendored):
+
+```bash
+bash deploy/fetch-models.sh
+```
+
+---
+
+## Quick start
+
+```powershell
+# 1. Check the config before touching any hardware. Exits 2 on problems.
+campus validate --config configs/system.yaml --cameras configs/cameras.yaml
+
+# 2. Dev stack: Postgres + Redis + one CPU worker + identity + API
+docker compose -f deploy/docker-compose.yml up
+
+# 3. Size the pipeline on your own footage. This is the only number that counts.
+campus bench footage/canteen.mkv --frames 200
+```
+
+GPU production profile:
+
+```bash
+docker compose -f deploy/docker-compose.gpu.yml up -d
+```
+
+### Commands
+
+| Command | Purpose |
 | --- | --- |
-| `setup.bat` | One-click bootstrap: install/verify FFmpeg + VLC |
-| `start_stream.bat` | One-click live stream in VLC |
-| `cam_stream.py` | Main tool. `wait` / `probe` / `snap` / `record` / `play` / `view` |
-| `rtsp_recover.py` | RFC 2069 digest client; searches default credentials on RTSP |
-| `isapi_login.py` | Tests a credential against the ISAPI endpoints |
-| `isapi_search.py` | Searches default credentials against ISAPI |
-| `verify_rtsp.py` | Verifies a credential and dumps the SDP |
-| `single_check.py` | One-shot auth check; distinguishes IP ban from wrong password |
+| `campus validate` | Config and model check, exit 2 on problems |
+| `campus bench VIDEO` | Per-frame latency and sustainable cameras/node |
+| `campus worker` | Run a capture worker over a slice of cameras |
+| `campus identity` | Run the identity service |
+| `campus api` | Serve the HTTP API |
+| `campus enroll STU:DIR ...` | Enroll students from photos |
+| `campus index` | Rebuild and report the gallery index |
 
-## Quick start on a new machine
+`--config` and `--cameras` work before or after the subcommand.
 
-Two double-clicks and you are watching the stream.
+---
 
-1. **`setup.bat`** — verifies Python, installs FFmpeg and VLC via winget,
-   writes `camera.env` from the template. Safe to re-run; anything already
-   present is skipped.
-2. **`start_stream.bat`** — reads `camera.env` and opens the live stream in
-   VLC. Falls back to `ffplay` if VLC is missing.
+## The pipeline
 
-`setup.bat` needs `winget` (present on Windows 10 1809+ / Windows 11) for the
-FFmpeg and VLC installs. Everything else is detected, not downloaded.
-
-### Dependencies
-
-| Tool | Why | Installed by |
-| --- | --- | --- |
-| Python 3.10+ | runs the scripts | pre-existing; verified by setup |
-| FFmpeg | `snap`, `record`, `play` | winget `Gyan.FFmpeg` |
-| VLC | GUI playback | winget `VideoLAN.VLC` |
-
-**No pip packages are required.** Every script uses only the Python standard
-library and shells out to FFmpeg. `requirements.txt` exists but is entirely
-comments - it lists optional packages (PyAV, OpenCV, NumPy) that you would only
-need if you extend the scripts to decode frames in Python rather than
-delegating to FFmpeg.
-
-### Configuration
-
-`setup.bat` copies `camera.env.example` to `camera.env` on first run. Edit
-`camera.env` to point at a different camera:
-
-```bat
-CAM_HOST=117.196.244.183
-CAM_PORT=554
-CAM_USER=root
-CAM_PASS=1234567890
-CAM_PATH=/Streaming/Channels/101
+```
+4K frame
+   -> motion gate
+   -> tile plan (8 tiles @ 1280px, 25% overlap)   crop, never resize
+   -> SCRFD 2.5G, one batched pass over live tiles
+   -> NMS merge into frame coordinates
+   -> quality gate (size/blur/pose/illumination)  drops ~70-85%
+   -> Umeyama alignment to 112x112
+   -> ArcFace, batched, L2-normalised 512-d
+   -> ByteTrack, one id per person per camera
+   -> FAISS top-5
+   -> temporal verification
+   -> commit
 ```
 
-`camera.env` is gitignored, since it is per-device. The same keys work as
-environment variables for the Python scripts:
+---
 
-```powershell
-$env:CAM_HOST = "117.196.244.183"
-python cam_stream.py snap
+## Layout
+
+```
+src/campus/
+  types.py            domain types; the capture/identity plane boundary
+  config.py           pydantic config, validated once at startup
+  cli.py              entry point
+  imaging/            tiling, quality gate, alignment
+  temporal/           verifier  <- the important one
+  index/              FAISS + NumPy gallery, centroiding
+  track/              ByteTrack
+  models/             SCRFD, ArcFace ONNX wrappers
+  capture/            RTSP ingest, NVDEC, health
+  worker/             capture worker + Redis bus
+  identity/           identity service
+  consent/            DPDP consent, purpose limitation, erasure
+  enroll/             enrollment service
+  store/              Postgres
+  api/                FastAPI
+sql/schema.sql        schema, partitions, append-only audit trigger
+configs/              system.yaml, cameras.yaml
+deploy/               Dockerfiles, compose, fetch-models.sh
+tests/                151 tests, CPU-only, no GPU or weights required
 ```
 
-## Manual usage
+---
 
-Everything is also configurable through environment variables, with the
-discovered values as defaults:
+## Three things to know before changing anything
 
-```powershell
-$env:CAM_HOST = "117.196.244.183"
-$env:CAM_USER = "root"
-$env:CAM_PASS = "1234567890"
+**1. `temporal/verifier.py` is load-bearing.** The margin over the runner-up is
+what makes a multi-frame commitment meaningful, and it is computed from rank 2.
+If the verifier ever records only the top-1 candidate, every track looks
+uncontested, the margin becomes a constant, and the system degrades to
+coin flips *while every test still passes*. `test_temporal.py` guards this.
+
+**2. Alignment has three guards that return `None` rather than a fallback crop.**
+Unaligned, degenerate, and mirrored landmarks all produce embeddings that look
+valid and match nobody. Never substitute a fallback — it converts a loud
+failure into a silent one.
+
+**3. Postgres is the source of truth; FAISS is disposable.** A gallery that
+lives only in GPU memory is unrecoverable after a node failure, impossible to
+audit, and makes DPDP erasure unimplementable.
+
+---
+
+## Testing
+
+```bash
+python -m pytest -q          # 151 tests, no GPU, no weights, ~4s
 ```
 
-### Viewing and recording
+Synthetic throughout. `campus bench` on real footage is what validates
+*accuracy*; the suite validates that the logic is *correct*. The two are not
+interchangeable, and tuning thresholds against synthetic data will mislead you.
 
-```powershell
-python cam_stream.py probe      # SDP: codec, resolution, framerate
-python cam_stream.py snap       # single JPEG -> out/snapshot.jpg
-python cam_stream.py record 30  # 30s clip -> out/recording.mp4 (-c copy)
-python cam_stream.py play       # live view in ffplay
-python cam_stream.py view       # live view in VLC
-```
+---
 
-Equivalent ffmpeg, if you prefer to drive it directly:
+## Security
 
-```powershell
-ffplay -rtsp_transport tcp "rtsp://root:PASS@117.196.244.183:554/Streaming/Channels/101"
-ffmpeg -rtsp_transport tcp -i "rtsp://root:PASS@117.196.244.183:554/Streaming/Channels/101" -t 30 -c copy out.mp4
-```
-
-## Rate limiting — read this first
-
-These units enforce a **client-side attempt cap** (`iMaxQANum`, default 3) and, in
-practice, an **IP-level RTSP ban** that trips after burst traffic. The cap is only
-a JS constant, but the IP ban is real and server-side.
-
-Symptoms of a ban: TCP connects successfully, then the connection is reset
-(`WinError 10054`) before any RTSP response — even for an unauthenticated request.
-This is *not* a credential problem. `single_check.py` distinguishes the two, and
-`cam_stream.py wait` polls gently until the ban lifts.
-
-Do not run the credential search tools in a loop. One pass is enough; a
-successful search still leaves the IP temporarily blocked.
-
-A **different machine on a different network is not affected** by an existing
-ban, since the block is per source IP. Setting up a second device is therefore
-usually the fastest way around a ban on the first.
-
-## Credential hygiene
-
-The default credential was found by `rtsp_recover.py` and is committed here as a
-constant. It is a **factory default that was never changed**, and the camera is
-reachable from the public internet with RTSP exposed.
-
-Rotate it. Also worth doing:
-
-- Change the admin password in the web UI
-- Keep RTSP off the public internet, or put it behind a VPN / firewall rule
-- The web login uses a separate account from RTSP; changing the RTSP password
-  does not change the web one
+- Camera passwords live in environment variables, never in `cameras.yaml`
+  (the config is committed and spans departments).
+- `CAMPUS_API_KEY` is required; `campus api` refuses to start without it unless
+  explicitly passed `--insecure`.
+- Containers run as a non-root uid.
+- Redis is `noeviction` so backpressure is visible rather than silent.
+- `audit_log` rejects `UPDATE` and `DELETE` at the database level.

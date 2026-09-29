@@ -1,0 +1,146 @@
+# Production GPU profile.
+#
+# Sizing is in ARCHITECTURE.md. Short version: a 4K frame at tile_size=1280 /
+# overlap=0.25 is 8 tiles, so 400 cameras at 8fps is ~26k tiled detections/sec
+# before motion gating. That needs roughly 20+ L40S-equivalents — which is why
+# the doc's main recommendation is tiering the cameras rather than buying 20
+# GPUs to run face recognition in an empty corridor.
+#
+# Requires the NVIDIA Container Toolkit. NVDEC is the load-bearing part: 400
+# concurrent 4K H.265 decodes is not a CPU tuning problem, and the NVDEC
+# session limit is usually the binding constraint before the GPU is.
+
+name: campus-prod
+
+x-worker: &worker
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.gpu
+  depends_on: [redis]
+  environment: &worker-env
+    CAMPUS_DETECTOR_DEVICE: CUDAExecutionProvider
+    CAMPUS_EMBEDDER_DEVICE: CUDAExecutionProvider
+    # One process per GPU. Two processes sharing one device halve the model
+    # workspace and stop the batching from being worthwhile.
+    CAMPUS_ORT_THREADS: "8"
+  command: >
+    campus worker
+    --config configs/system.yaml
+    --cameras configs/cameras.yaml
+    --max-cameras 32
+  volumes:
+    - ../models:/app/models:ro
+    # NVDEC needs the device nodes, not just the runtime.
+  devices:
+    - /dev/nvidia0:/dev/nvidia0
+    - /dev/nvidiactl:/dev/nvidiactl
+    - /dev/nvidia-uvm:/dev/nvidia-uvm
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+      limits: {cpus: "16", memory: 32G}
+  restart: unless-stopped
+
+services:
+  worker-a:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      CAMPUS_WORKER_ID: worker-a
+
+  worker-b:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      CAMPUS_WORKER_ID: worker-b
+
+  worker-c:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      CAMPUS_WORKER_ID: worker-c
+
+  worker-d:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      CAMPUS_WORKER_ID: worker-d
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 8gb
+      --maxmemory-policy noeviction
+    deploy:
+      resources: {limits: {memory: 10G}}
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: campus
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: campus
+    secrets: [db_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    deploy:
+      resources: {limits: {memory: 16G}}
+    restart: unless-stopped
+
+  identity:
+    build: {context: .., dockerfile: deploy/Dockerfile}
+    depends_on: [postgres, redis]
+    environment:
+      CAMPUS_API_KEY_FILE: /run/secrets/api_key
+    secrets: [api_key, db_password]
+    command: campus identity --config configs/system.yaml
+    deploy:
+      replicas: 2
+      resources: {limits: {memory: 4G}}
+    restart: unless-stopped
+
+  api:
+    build: {context: .., dockerfile: deploy/Dockerfile}
+    depends_on: [postgres, redis]
+    secrets: [api_key, db_password]
+    command: campus api --config configs/system.yaml
+    deploy:
+      replicas: 2
+      resources: {limits: {memory: 2G}}
+    restart: unless-stopped
+
+  # Retention. Dropping partitions is instant; a DELETE over a month of
+  # presence rows is not. This job exists so nobody hand-writes a DELETE.
+  retention:
+    build: {context: .., dockerfile: deploy/Dockerfile}
+    depends_on: [postgres]
+    environment:
+      PGHOST: postgres
+      PGUSER: campus
+      PGDATABASE: campus
+      PGPASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        while true; do
+          psql -c "SELECT ensure_presence_partitions(2)";
+          psql -c "DROP TABLE IF EXISTS presence_events_$$(date -d '60 days ago' +%Y_%m)";
+          sleep 86400;
+        done
+    restart: unless-stopped
+
+secrets:
+  db_password: {file: ./secrets/db_password}
+  api_key: {file: ./secrets/api_key}
+
+volumes:
+  pgdata:

@@ -1,0 +1,94 @@
+# Development stack: Postgres, Redis, one CPU worker, identity, API.
+#
+# This is a correctness harness, not a performance target. CPU-only SCRFD
+# handles a handful of cameras; the 400-camera fleet needs the GPU profile
+# (docker-compose.gpu.yml) and a real NVDEC host.
+
+name: campus-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: campus
+      POSTGRES_PASSWORD: campus
+      POSTGRES_DB: campus
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../sql/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 2gb
+      --maxmemory-policy noeviction
+    # noeviction, not allkeys-lru. A silently trimmed observation stream means
+    # missing attendance records with no error anywhere; a refused write at
+    # least surfaces in the health endpoint as a failure to page on.
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      CAMPUS_WORKER_ID: worker-dev-1
+      CAMPUS_DETECTOR_DEVICE: CPUExecutionProvider
+      CAMPUS_EMBEDDER_DEVICE: CPUExecutionProvider
+      OMP_NUM_THREADS: "4"
+    command: >
+      campus worker
+      --config configs/system.yaml
+      --cameras configs/cameras.yaml
+      --max-cameras 2
+    volumes:
+      - ../models:/app/models:ro
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 6G}
+
+  identity:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      CAMPUS_DETECTOR_DEVICE: CPUExecutionProvider
+    command: campus identity --config configs/system.yaml
+    volumes:
+      - ../models:/app/models:ro
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on: [postgres, redis]
+    environment:
+      CAMPUS_API_KEY: ${CAMPUS_API_KEY:?set CAMPUS_API_KEY in .env}
+    command: campus api --config configs/system.yaml --port 8080
+    ports: ["8080:8080"]
+    volumes:
+      - ../models:/app/models:ro
+
+volumes:
+  pgdata:
+  redisdata:

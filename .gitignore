@@ -1,10 +1,8 @@
 # Captured media and recordings
 out/
 
-# Local credential overrides (optional; defaults are baked in as constants)
-.env
-
-# Per-device connection settings, generated from camera.env.example
+# Per-device connection settings. Holds a live camera credential; must never
+# reach the repo.
 camera.env
 
 # Vendored third-party repo - tracked separately, not part of this project
@@ -16,6 +14,17 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Model weights: ~500MB of binaries, and InsightFace's licensing is not ours
+# to redistribute. Fetched by deploy/fetch-models.sh.
+models/
+
+# Deployment secrets — camera passwords and the API key never enter the repo.
+deploy/secrets/
+.env.deploy
 
 # OS / editor noise
 .DS_Store

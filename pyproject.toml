@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "campus"
+version = "0.1.0"
+description = "University-wide student presence tracking across 400+ CCTV cameras"
+requires-python = ">=3.11"
+
+# Core runtime. Deliberately small: the CPU-runnable control plane (tiling,
+# quality gating, temporal verification, indexing, tracking) must not depend on
+# any accelerator stack, so it stays testable on a laptop.
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Inference. `onnxruntime-gpu` on the worker nodes; plain `onnxruntime` for CPU
+# development boxes.
+inference = [
+    "onnxruntime>=1.17",
+    "insightface>=0.7.3",
+]
+index = [
+    "faiss-cpu>=1.8",
+]
+# GPU index (built against CUDA 12). Keep mutually exclusive with `index`.
+index-gpu = [
+    "faiss-gpu-cu12>=1.8",
+]
+services = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "psycopg[binary,pool]>=3.1",
+    "redis>=5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[project.scripts]
+campus = "campus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:campus.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["campus"]
+ignore_missing_imports = true
+warn_unused_ignores = false

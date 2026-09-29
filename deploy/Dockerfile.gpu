@@ -1,0 +1,39 @@
+# GPU image: capture workers only.
+#
+# Separate from the CPU image on purpose. onnxruntime-gpu and faiss-gpu pin
+# CUDA 12 and drag in large NCCL/cuDNN dependencies; the identity service and
+# API do not need them, and pulling CUDA into the control plane triples the
+# image and widens the patch surface for no benefit.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3-pip ffmpeg libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+
+# onnxruntime-gpu first so it is not clobbered by the plain wheel that
+# `inference` would otherwise pull in. This ordering bug is silent — the
+# container starts and simply runs on CPU at 1/20th the speed.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir onnxruntime-gpu==1.19.2 faiss-gpu-cu12 \
+    && pip install --no-cache-dir -e ".[inference]"
+
+COPY sql ./sql
+COPY configs ./configs
+
+RUN useradd --create-home --uid 10001 campus && chown -R campus:campus /app
+USER campus
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
+# One process per GPU. The container is the process boundary; running two
+# workers in one container shares the model workspace and defeats batching.
+CMD ["campus", "worker", "--config", "configs/system.yaml", "--cameras", "configs/cameras.yaml"]

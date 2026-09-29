@@ -1,0 +1,62 @@
+# Camera inventory.
+#
+# Passwords are never stored here. Each camera names an environment variable
+# that holds its RTSP password; the config is committed and shared across
+# departments, and the passwords are provisioned through the university secret
+# store.
+#
+# Generate this from the NVRM/camera list, not by hand — 400 hand-typed
+# entries will contain a typo in a stream path, and that camera will be dark.
+
+cameras:
+  - id: gate-main-n
+    name: Main gate north
+    host: 10.20.0.11
+    zone: default
+    rtsp_path: /Streaming/Channels/101
+    target_fps: 8.0
+    username_env: CAM_MAIN_N_PASS
+
+  - id: gate-main-s
+    name: Main gate south
+    host: 10.20.0.12
+    zone: default
+    username_env: CAM_MAIN_S_PASS
+
+  - id: lib-reading
+    name: Library reading room
+    host: 10.20.1.40
+    zone: library
+    # A reading room is quiet and well-lit and mostly still. Lower the frame
+    # rate and raise the size floor: nothing here benefits from 8fps and the
+    # distant faces fail anyway.
+    target_fps: 4.0
+    overrides:
+      min_face_px: 32
+    username_env: CAM_LIB_READING_PASS
+
+  - id: corridor-c-block
+    name: C block corridor
+    host: 10.20.2.15
+    zone: corridor
+    target_fps: 8.0
+    overrides:
+      # Corridor cameras see people at the end of a long run. Accept smaller
+      # faces here than elsewhere or the far end of the corridor contributes
+      # nothing to attendance.
+      min_face_px: 18
+      min_margin: 0.05
+    username_env: CAM_CORRIDOR_PASS
+
+  - id: canteen-hall
+    name: Canteen hall
+    host: 10.20.3.8
+    zone: default
+    # The hardest case on campus: 200+ people, heavy occlusion, mixed lighting.
+    # 12fps because people cross the frame quickly and a lower rate loses the
+    # track before the verifier has enough frames to commit.
+    target_fps: 12.0
+    overrides:
+      min_face_px: 20
+      max_occlusion_ratio: 0.55
+    username_env: CAM_CANTEEN_PASS

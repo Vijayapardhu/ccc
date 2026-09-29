@@ -1,0 +1,95 @@
+# Campus presence tracking — system configuration.
+#
+# Thresholds in this file are the tuning surface. They were chosen against real
+# campus footage, and they are deliberately asymmetric: the system is tuned to
+# miss a sighting occasionally rather than to attribute a sighting to the wrong
+# student. Re-tune with `campus bench` against your own recordings.
+
+detectors:
+  model_path: models/scrfd_2.5g.onnx
+  device: null                      # null = auto (CUDA if available, else CPU)
+  input_size: 640
+  score_threshold: 0.5
+  nms_threshold: 0.4
+  tile_size: 1280
+  # 0.25 -> ~28% of faces sit on a tile seam and are detected twice (deduped by
+  # NMS). Drop to 0.125 if a node is GPU-bound; watch `tile_count` telemetry.
+  tile_overlap: 0.25
+  min_tile_size: 320
+
+embedder:
+  model_path: models/glintr100k.onnx
+  device: null
+  dim: 512
+  max_batch: 256
+
+gallery:
+  backend: auto                     # faiss if importable, else numpy
+  use_gpu: true
+  top_k: 5
+  rebuild_batch: 5000
+
+worker:
+  worker_id: ${CAMPUS_WORKER_ID}    # overridden by env
+  redis_url: redis://redis:6379/0
+  postgres_dsn: postgresql://campus:campus@postgres:5432/campus
+  max_cameras: 32
+  publish_interval_s: 1.0
+  observation_ttl_s: 300
+  stream_backend: nvdec
+  jpeg_quality: 3
+  on_error: drop_frame
+
+# Quality gate. Applied to every detection before embedding.
+# Raising min_face_px is the single most effective latency lever: it drops
+# the number of embeddings, which dominates GPU cost.
+quality:
+  min_face_px: 24
+  min_face_ratio: 0.015
+  min_blur_score: 45.0
+  max_blur_score: 900.0
+  max_yaw_deg: 45.0
+  max_pitch_deg: 35.0
+  max_roll_deg: 40.0
+  min_brightness: 25.0
+  max_brightness: 235.0
+  min_contrast: 12.0
+  max_occlusion_ratio: 0.42
+
+# Temporal verification. The margin is the load-bearing parameter.
+verification:
+  window: 12
+  min_support: 7
+  # Below the sibling band on purpose — see campus/temporal/verifier.py
+  min_median_score: 0.38
+  min_margin: 0.06
+  overturn_score: 0.62
+  overturn_frames: 5
+  min_observations: 5
+  max_gap_s: 2.5
+  decay_half_life_s: 8.0
+
+purposes:
+  - attendance
+  - safety
+
+zones:
+  default:
+    zone: default
+    allowed_purposes: [attendance, safety]
+    require_consent: true
+    retention_days: 30
+  # Corridor cameras: needed for safety, identity not retained beyond the shift.
+  # This is the zone that makes the system defensible under DPDP — most
+  # cameras never need to keep an identity at all.
+  corridor:
+    zone: corridor
+    allowed_purposes: [safety]
+    require_consent: true
+    retention_days: 7
+    anonymise_after_minutes: 60
+  library:
+    zone: library
+    allowed_purposes: [attendance, access_control]
+    require_consent: true
+    retention_days: 90
