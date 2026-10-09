@@ -486,8 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = add("enroll", "enroll students from photos")
     e.add_argument("students", nargs="+", metavar="STUDENT_ID:DIR")
-    e.add_argument("--detector-model", default="models/scrfd_10g.onnx")
-    e.add_argument("--embedder-model", default="models/glintr100k.onnx")
+    e.add_argument("--detector-model", default="models/det_10g.onnx")
+    e.add_argument("--embedder-model", default="models/w600k_r50.onnx")
     e.add_argument("--device")
     e.add_argument("--persist", action="store_true", help="write vectors to Postgres")
     e.set_defaults(func=cmd_enroll)
@@ -515,7 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--merge", action="store_true",
                    help="fold into the existing --out gallery, replacing students "
                         "already present, instead of overwriting the whole file")
-    g.add_argument("--detector-model", default="models/scrfd_10g.onnx")
+    g.add_argument("--detector-model", default="models/det_10g.onnx")
     g.add_argument("--embedder-model", default="models/w600k_r50.onnx")
     g.add_argument("--device")
     g.add_argument("--min-face-px", type=int, default=90,
@@ -527,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     u = add("ui", "live pipeline inspector")
     u.add_argument("--gallery", default="models/gallery.npz")
-    u.add_argument("--detector-model", default="models/scrfd_2.5g.onnx")
+    u.add_argument("--detector-model", default="models/det_10g.onnx")
     u.add_argument("--embedder-model", default="models/w600k_r50.onnx")
     u.add_argument("--device")
     u.add_argument("--backend", default="software", choices=["software", "nvdec", "vaapi"])
@@ -542,6 +542,20 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--host", default="127.0.0.1")
     u.add_argument("--port", type=int, default=8099)
     u.set_defaults(func=cmd_ui)
+
+    b = add("bench", "measure the pipeline on a video file")
+    b.add_argument("video")
+    b.add_argument("--frames", type=int, default=200)
+    b.add_argument("--detector-model", default="models/det_10g.onnx")
+    b.add_argument("--embedder-model", default="models/w600k_r50.onnx")
+    b.add_argument("--device", default="CPUExecutionProvider")
+    b.add_argument("--input-size", type=int, default=640)
+    b.add_argument("--tile-size", type=int, default=640)
+    b.add_argument("--tile-overlap", type=float, default=0.25)
+    b.add_argument("--target-fps", type=float, default=12.0)
+    b.add_argument("--utilisation", type=float, default=0.7)
+    b.add_argument("--progress", action="store_true")
+    b.set_defaults(func=cmd_bench)
 
     return p
 
