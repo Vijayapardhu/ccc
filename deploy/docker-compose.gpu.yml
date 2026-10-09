@@ -1,14 +1,16 @@
 # Production GPU profile.
 #
-# Sizing is in ARCHITECTURE.md. Short version: a 4K frame at tile_size=1280 /
-# overlap=0.25 is 8 tiles, so 400 cameras at 8fps is ~26k tiled detections/sec
-# before motion gating. That needs roughly 20+ L40S-equivalents — which is why
-# the doc's main recommendation is tiering the cameras rather than buying 20
-# GPUs to run face recognition in an empty corridor.
+# Sizing is in ARCHITECTURE.md. Short version: a 1080p frame at
+# tile_size=640 / overlap=0.25 is 8 tiles, so 400 cameras at 12fps is ~40k
+# tiled detections/sec before motion gating. That needs roughly 15-20
+# L40S-equivalents — which is why the doc's main recommendation is tiering the
+# cameras rather than buying 20 GPUs to identify people 20 metres away through
+# a 720p lens.
 #
-# Requires the NVIDIA Container Toolkit. NVDEC is the load-bearing part: 400
-# concurrent 4K H.265 decodes is not a CPU tuning problem, and the NVDEC
-# session limit is usually the binding constraint before the GPU is.
+# Requires the NVIDIA Container Toolkit. NVDEC is load-bearing: 400 concurrent
+# H.265 decodes is not a CPU tuning problem, and the NVDEC session limit is
+# usually the binding constraint before the GPU is. 1080p and 720p decode far
+# more cheaply than 4K, so this is less painful than it would be at 4K.
 
 name: campus-prod
 

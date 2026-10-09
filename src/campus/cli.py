@@ -191,8 +191,131 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gallery(args: argparse.Namespace) -> int:
+    from campus.gallery import build_from_photos, load, merge, save
+    from campus.imaging.quality import QualityThresholds
+    from campus.models.arcface import ArcFaceEmbedder
+    from campus.models.scrfd import ScrfdDetector
+
+    if args.info:
+        try:
+            print(json.dumps(load(args.out).summary(), indent=2))
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return 0
+
+    detector = ScrfdDetector(args.detector_model, device=args.device)
+    embedder = ArcFaceEmbedder(args.embedder_model, device=args.device)
+    quality = QualityThresholds(min_face_px=args.min_face_px, max_blur_score=args.max_blur_score)
+
+    def progress(done: int, total: int, enrolled: int) -> None:
+        print(f"  {done}/{total} files, {enrolled} students", file=sys.stderr)
+
+    gallery, rejects = build_from_photos(
+        args.photos, detector, embedder, quality=quality, on_progress=progress
+    )
+
+    replaced: list[str] = []
+    if args.merge:
+        try:
+            base = load(args.out)
+        except FileNotFoundError:
+            print(f"--merge: no existing gallery at {args.out}, creating one", file=sys.stderr)
+        else:
+            gallery, replaced = merge(base, gallery)
+
+    path = save(args.out, gallery)
+
+    if rejects:
+        print(f"\n{len(rejects)} student(s) failed enrollment:", file=sys.stderr)
+        for sid, why in list(rejects.items())[:15]:
+            print(f"  {sid}: {why[0]}", file=sys.stderr)
+        if len(rejects) > 15:
+            print(f"  ... and {len(rejects) - 15} more", file=sys.stderr)
+        if args.strict:
+            return 1
+
+    out = {**gallery.summary(), "path": str(path)}
+    if replaced:
+        out["replaced"] = replaced
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    import uvicorn  # noqa: PLC0415
+
+    from campus.capture.source import DecodeBackend
+    from campus.config import validate_cameras
+    from campus.gallery import load as load_gallery, to_index
+    from campus.models.arcface import ArcFaceEmbedder
+    from campus.models.scrfd import ScrfdDetector
+    from campus.ui import app as ui_app
+    from campus.ui.runner import CameraRunner
+
+    system, cameras = _load(args)
+    problems = validate_cameras(cameras)
+    if problems:
+        for p in problems:
+            print(f"config error: {p}", file=sys.stderr)
+        return 2
+
+    gallery = None
+    if args.gallery:
+        try:
+            gallery = load_gallery(args.gallery)
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            print("build one first:  campus gallery build --photos DIR --out gallery.npz",
+                  file=sys.stderr)
+            return 2
+
+    detector = ScrfdDetector(args.detector_model, device=args.device)
+    embedder = ArcFaceEmbedder(args.embedder_model, device=args.device)
+    index = to_index(gallery) if gallery is not None else None
+
+    print(json.dumps({
+        "cameras": [c.id for c in cameras],
+        "gallery": gallery.summary() if gallery else {"students": 0},
+        "embedder_dim": embedder.dim,
+    }))
+
+    backend = DecodeBackend(args.backend)
+    runners = {
+        c.id: CameraRunner(
+            config=c, detector=detector, embedder=embedder, index=index,
+            verification=system.verification,
+            quality=system.quality_for(c), backend=backend,
+            detect_stride=args.detect_stride, stream_fps=args.stream_fps,
+        )
+        for c in cameras
+    }
+    for r in runners.values():
+        r.start()
+
+    ui_app.configure(runners, {
+        "detector": str(args.detector_model),
+        "embedder": f"{args.embedder_model} ({embedder.dim}-d)",
+        "gallery": gallery.summary() if gallery else {},
+        "quality": {f: getattr(system.quality, f) for f in system.quality.__slots__},
+        "verification": {f: getattr(system.verification, f) for f in system.verification.__slots__},
+        "stream_fps": args.stream_fps,
+        "detect_stride": args.detect_stride,
+        "_gallery_file": gallery,
+    })
+    print(f"inspector on http://{args.host}:{args.port}", file=sys.stderr)
+    try:
+        uvicorn.run(ui_app.api, host=args.host, port=args.port, log_level="warning")
+    finally:
+        for r in runners.values():
+            r.stop()
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from campus.config import validate_cameras
+    from campus.runtime import format_report, full_report
 
     system, cameras = _load(args)
     problems = validate_cameras(cameras)
@@ -214,13 +337,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"purpose rules explicit."
             )
 
+    runtime = full_report()
+    if args.strict_runtime:
+        problems.extend(runtime.problems)
+
     result = {
         "cameras": len(cameras),
         "enabled": len(enabled),
         "zones": sorted(zones),
+        "runtime": runtime.to_dict(),
         "problems": problems,
     }
     print(json.dumps(result, indent=2))
+    if not args.quiet:
+        print("\nruntime:\n" + format_report(runtime))
     return 2 if problems else 0
 
 
@@ -368,23 +498,50 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--cpu", action="store_true")
     x.set_defaults(func=cmd_index)
 
-    v = add("validate", "validate configuration, exit 2 on problems")
+    v = add("validate", "validate configuration and runtime, exit 2 on problems")
+    v.add_argument(
+        "--strict-runtime",
+        action="store_true",
+        help="also fail on runtime problems (no GPU, CPU-only onnxruntime, "
+        "missing faiss). Off by default so a laptop can validate config.",
+    )
+    v.add_argument("--quiet", action="store_true", help="JSON only, no runtime table")
     v.set_defaults(func=cmd_validate)
 
-    b = add("bench", "measure pipeline cost on a video file")
-    b.add_argument("video")
-    b.add_argument("--frames", type=int, default=100)
-    b.add_argument("--detector-model", default="models/scrfd_2.5g.onnx")
-    b.add_argument("--embedder-model", default="models/glintr100k.onnx")
-    b.add_argument("--device")
-    b.add_argument("--input-size", type=int, default=640)
-    b.add_argument("--tile-size", type=int, default=1280)
-    b.add_argument("--tile-overlap", type=float, default=0.25)
-    b.add_argument("--target-fps", type=float, default=8.0)
-    b.add_argument("--utilisation", type=float, default=0.7,
-                   help="fraction of the node's capacity you are willing to plan for")
-    b.add_argument("--progress", action="store_true")
-    b.set_defaults(func=cmd_bench)
+    g = add("gallery", "build or inspect a gallery file")
+    g.add_argument("--photos", help="folder of <STUDENT>.jpg to enroll")
+    g.add_argument("--out", default="models/gallery.npz")
+    g.add_argument("--info", action="store_true", help="describe an existing gallery and exit")
+    g.add_argument("--merge", action="store_true",
+                   help="fold into the existing --out gallery, replacing students "
+                        "already present, instead of overwriting the whole file")
+    g.add_argument("--detector-model", default="models/scrfd_10g.onnx")
+    g.add_argument("--embedder-model", default="models/w600k_r50.onnx")
+    g.add_argument("--device")
+    g.add_argument("--min-face-px", type=int, default=90,
+                   help="enrollment is held to a far stricter bar than live "
+                        "detection; a bad gallery entry is permanent")
+    g.add_argument("--max-blur-score", type=float, default=6000.0)
+    g.add_argument("--strict", action="store_true", help="exit 1 if any student failed")
+    g.set_defaults(func=cmd_gallery)
+
+    u = add("ui", "live pipeline inspector")
+    u.add_argument("--gallery", default="models/gallery.npz")
+    u.add_argument("--detector-model", default="models/scrfd_2.5g.onnx")
+    u.add_argument("--embedder-model", default="models/w600k_r50.onnx")
+    u.add_argument("--device")
+    u.add_argument("--backend", default="software", choices=["software", "nvdec", "vaapi"])
+    u.add_argument("--stream-fps", type=float, default=15.0,
+                   help="MJPEG refresh rate for the panel. Independent of the "
+                        "analysis rate, which is reported alongside it.")
+    u.add_argument("--detect-stride", type=int, default=1,
+                   help="run detection every Nth frame. Detection is ~80%% of "
+                        "frame cost, so a stride of 2-3 roughly doubles or "
+                        "triples stream rate. Skipped frames produce no new "
+                        "evidence; the UI reports the count.")
+    u.add_argument("--host", default="127.0.0.1")
+    u.add_argument("--port", type=int, default=8099)
+    u.set_defaults(func=cmd_ui)
 
     return p
 

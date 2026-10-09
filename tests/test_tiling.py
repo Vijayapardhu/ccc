@@ -20,7 +20,7 @@ from .conftest import crowd_frame, face_box
 
 class TestPlanTiles:
     def test_small_frame_gets_one_tile(self):
-        tiles = plan_tiles(640, 480, detector_input=640, tile_size=1280, overlap=0.25)
+        tiles = plan_tiles(640, 480, detector_input=640, tile_size=640, overlap=0.25)
         assert len(tiles) == 1
         assert (tiles[0].x0, tiles[0].y0) == (0, 0)
         assert (tiles[0].x1, tiles[0].y1) == (640, 480)
@@ -29,6 +29,46 @@ class TestPlanTiles:
         tiles = plan_tiles(3840, 2160, detector_input=640, tile_size=1280, overlap=0.25)
         # stride 960 -> xs = [0,960,1920,2560] (4), ys = [0,880] (2) = 8 tiles
         assert len(tiles) == 8
+
+    def test_1080p_tiles_count(self):
+        """1920x1080 at tile_size=640, stride 480.
+
+        xs = [0,480,960,1280] (4), ys = [0,440] (2) -> 8 tiles. Same tile count
+        as 4K at tile_size=1280, because tiling at native scale makes the
+        detector's pixel budget depend on the detector, not the frame.
+        """
+        tiles = plan_tiles(1920, 1080, detector_input=640, tile_size=640, overlap=0.25)
+        assert len(tiles) == 8
+
+    def test_720p_tiles_count(self):
+        tiles = plan_tiles(1280, 720, detector_input=640, tile_size=640, overlap=0.25)
+        assert len(tiles) == 6
+
+    def test_deployed_resolutions_tile_at_native_scale(self):
+        """The single most damaging config error: tiling above the detector
+        input silently downsamples, so a 20px face reaches the detector as
+        10px and the camera reports nobody. 1:1 for anything up to 1080p."""
+        for width, height in ((1920, 1080), (1280, 720), (1920, 1200)):
+            tiles = plan_tiles(width, height, detector_input=640, tile_size=640, overlap=0.25)
+            assert all(t.scale == pytest.approx(1.0) for t in tiles), (
+                f"{width}x{height} is not tiled at native scale"
+            )
+
+    def test_4k_uses_half_scale_deliberately(self):
+        """4K is the one case where 0.5x is right: a 40px face is 20px after
+        downscaling, still far above the floor, and 1280px tiles keep the tile
+        count affordable (8 instead of 40)."""
+        tiles = plan_tiles(3840, 2160, detector_input=640, tile_size=1280, overlap=0.25)
+        assert tiles[0].scale == pytest.approx(0.5)
+        assert len(plan_tiles(3840, 2160, detector_input=640, tile_size=640, overlap=0.25)) == 40
+
+    def test_1080p_and_720p_tiles_cover_every_pixel(self):
+        for width, height in ((1920, 1080), (1280, 720)):
+            tiles = plan_tiles(width, height, detector_input=640, tile_size=640, overlap=0.25)
+            covered = np.zeros((height, width), dtype=bool)
+            for t in tiles:
+                covered[t.y0 : t.y1, t.x0 : t.x1] = True
+            assert covered.all(), f"tiling left uncovered pixels in {width}x{height}"
 
     def test_tiles_cover_every_pixel(self):
         """No part of the frame may be uncovered. A gap means faces there are

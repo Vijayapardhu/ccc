@@ -48,21 +48,54 @@ class QualityThresholds:
     """
 
     min_face_px: int = 24
-    """Below this, ArcFace embeddings are noise. Derived from measurement on our
-    own footage, not from the paper: at 24px the inter-arc error is comparable
-    to the inter-class gap between siblings."""
+    """Below this, ArcFace embeddings are noise.
+
+    **Measured, not estimated.** Same-photo queries at reduced resolution
+    against a real 358-student gallery:
+
+        actual face px    54    36    27    20    <20
+        top-1 accuracy  100%  100%   80%   33%     0%  (nothing survives detection)
+
+    So 24 is set just under the knee: 27px is still 80%, 20px has fallen to a
+    coin flip. Lowering it further does not buy coverage, it buys confident
+    wrong answers — and the temporal verifier will then *commit* those wrong
+    answers more confidently, because they are consistent across frames.
+
+    Convert to distance with ``face_px ~= 250/d`` at 1080p (~167/d at 720p):
+    24px is ~10m at 1080p and ~7m at 720p. That is a short range, and it is
+    the number to argue about when cameras are placed.
+
+    These are upper bounds: the query and the gallery entry came from the same
+    frontal studio photo, so only resolution and JPEG compression varied. A
+    real sighting differs in pose, expression and illumination, and the real
+    gallery is 50,000 students rather than 358. Measure on real footage.
+    """
 
     min_face_ratio: float = 0.015
     """Face must also be at least this fraction of the frame's short side, to
     reject false positives on distant clutter."""
 
     min_blur_score: float = 45.0
-    """Variance of the Laplacian. Cameras with high JPEG quality on motion
-    produce 60+; a smeared face lands under 20."""
+    """Variance of the Laplacian. Defocus and motion smear land well under this."""
 
-    max_blur_score: float = 900.0
-    """Conversely, a very high score means noise amplification in low light,
-    which is its own kind of unusable."""
+    max_blur_score: float = 6000.0
+    """Upper bound intended to catch sensor noise amplified in low light.
+
+    **This metric is strongly size-dependent, and the bound has to be set with
+    that in mind.** Measured on clean, in-focus faces at each size:
+
+        20px -> 2992      90px ->  684      250px ->  277
+        40px -> 1491     140px ->  473      400px ->  143
+
+    Small faces score *higher*, not lower, because a downscaled crop has more
+    edge per pixel and INTER_AREA downscaling of a detailed photo leaves
+    high-frequency content. The previous bound of 900 sat below the 40px
+    median of 1491, so it rejected clean, perfectly focused 1080p and 720p
+    faces as "noise" — silently, since a rejected face is indistinguishable
+    from an empty corridor. It also made measured accuracy rise with distance
+    for the wrong reason: faces were passing the gate as they grew, not
+    becoming easier to recognise.
+    """
 
     max_yaw_deg: float = 45.0
     max_pitch_deg: float = 35.0

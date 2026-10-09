@@ -40,6 +40,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque
 
+import numpy as np
+import numpy.typing as npt
+
+from campus.temporal.evidence import Observation, TrackEvidence
 from campus.types import (
     CameraId,
     GalleryCandidate,
@@ -99,6 +103,23 @@ class VerificationThresholds:
     after a re-association failure, so the window resets rather than merging
     two people's evidence."""
 
+    contest_frames: int = 3
+    """Consecutive disagreeing frames before a commitment is called contested.
+
+    One bad frame is not a dispute, it is a bad frame. Someone walking past
+    blinks, turns, and blurs; requiring the disagreement to persist is what
+    keeps stickiness doing its job while still catching the real failure,
+    where the evidence points somewhere else frame after frame.
+    """
+
+    min_gap_s: float = 1.0
+    """How recently the current evidence must have arrived to count as a live
+    disagreement. A commitment stays sticky through a short occlusion, because
+    that is what stops attendance flicker — but a track that has produced no
+    fresh evidence for a while is not 'contested', it is simply quiet, and
+    reporting it as contested would cry wolf on every pillar someone walks
+    behind."""
+
     decay_half_life_s: float = 8.0
     """Weights older observations lower. The middle of a window is worth more
     than the start, because recency reflects the person's current appearance
@@ -128,6 +149,7 @@ class _TrackState:
     track_id: TrackId
     camera_id: CameraId
     samples: Deque[_Sample] = field(default_factory=deque)
+    evidence: TrackEvidence = field(default_factory=TrackEvidence)
     committed_student: str | None = None
     committed_at: float = 0.0
     first_seen: float = 0.0
@@ -136,6 +158,8 @@ class _TrackState:
     emit_commit: bool = True
     runner_up: str | None = None
     runner_up_score: float = 0.0
+    dispute_run: int = 0
+    """Consecutive frames whose top-1 disagreed with the standing commitment."""
 
 
 class TemporalVerifier:
@@ -150,6 +174,41 @@ class TemporalVerifier:
     def __init__(self, thresholds: VerificationThresholds | None = None) -> None:
         self.t = thresholds or VerificationThresholds()
         self._tracks: dict[TrackId, _TrackState] = {}
+
+    def record_evidence(
+        self,
+        track_id: TrackId,
+        camera_id: CameraId,
+        timestamp: float,
+        embedding: npt.NDArray[np.float32],
+        report: QualityReport,
+        det_score: float,
+    ) -> TrackEvidence:
+        """Add this frame to the track's evidence buffer and return it.
+
+        Kept separate from :meth:`observe` because the caller must *search* with
+        the buffer's best embedding before it can report candidates — the
+        candidates and the evidence that produced them are causally ordered.
+        """
+        state = self._tracks.get(track_id)
+        if state is None:
+            state = _TrackState(track_id=track_id, camera_id=camera_id)
+            self._tracks[track_id] = state
+        state.evidence.add(
+            Observation(
+                timestamp=timestamp,
+                embedding=np.asarray(embedding, dtype=np.float32).ravel(),
+                face_px=report.face_px,
+                blur=report.blur_score,
+                yaw=report.yaw_deg,
+                pitch=report.pitch_deg,
+                roll=report.roll_deg,
+                brightness=report.brightness,
+                contrast=report.contrast,
+                det_score=det_score,
+            )
+        )
+        return state.evidence
 
     def observe(
         self,
@@ -223,6 +282,19 @@ class TemporalVerifier:
                     statistics.median([s.top_score for s in state.samples]) if state.samples else 0.0,
                     candidates,
                 )
+
+            dispute = self._dispute(state, timestamp)
+            if dispute is not None:
+                # Fresh evidence points somewhere else but is not strong enough
+                # to justify an overturn. Report the disagreement instead of
+                # re-asserting the standing commitment as current fact.
+                return (
+                    ObservationOutcome.CONTESTED,
+                    state.committed_student,
+                    dispute,
+                    candidates,
+                )
+
             # Sticky: report the standing commitment, not this frame's
             # possibly-bad top-1.
             return (
@@ -302,6 +374,11 @@ class TemporalVerifier:
         if commit is not None:
             return commit
         return None
+
+    def evidence(self, track_id: TrackId) -> TrackEvidence | None:
+        """The per-track evidence buffer, if a track exists."""
+        state = self._tracks.get(track_id)
+        return None if state is None else state.evidence
 
     def finalize_all(self) -> list[TrackCommit]:
         out = [c for c in (self.finalize(tid) for tid in list(self._tracks)) if c is not None]
@@ -390,6 +467,43 @@ class TemporalVerifier:
         runner_up_score = rivals[0][1] if rivals else 0.0
 
         return (leader, leader_score, runner_up, runner_up_score, median)
+
+    def _dispute(self, state: _TrackState, now: float) -> float | None:
+        """Score of a *sustained* disagreeing candidate, or None.
+
+        A dispute is not one bad frame — that is someone blinking or turning,
+        and treating it as a dispute would put the flicker straight back that
+        stickiness exists to remove. It requires the challenger to hold top-1
+        across `contest_frames` consecutive frames.
+
+        It is also not a near-tie between two plausible students. It is the
+        observed failure mode: the track committed to someone while they faced
+        the camera, and the current evidence has since favoured a different
+        person — usually someone who matches nobody well, because our subject
+        turned away. Neither reading is right to assert, so the caller reports
+        the disagreement and keeps the commitment only for the eventual event.
+        """
+        if not state.samples:
+            return None
+        latest = state.samples[-1]
+        if now - latest.timestamp > self.t.min_gap_s:
+            # Quiet, not disputed. Reporting a contest here would cry wolf
+            # every time someone walks behind a pillar.
+            return None
+
+        tail = list(state.samples)[-self.t.contest_frames :]
+        if len(tail) < self.t.contest_frames:
+            return None
+        if any(now - s.timestamp > self.t.min_gap_s for s in tail[:-1]):
+            return None
+        if any(s.top_id == state.committed_student for s in tail):
+            return None
+        if len({s.top_id for s in tail}) != 1:
+            # The challenger is not even consistent with itself, which is what
+            # noise looks like. Sticking with the commitment is the right call.
+            return None
+
+        return float(np.mean([s.top_score for s in tail]))
 
     def _count_support(self, state: _TrackState, student_id: str) -> int:
         return sum(1 for s in state.samples if s.top_id == student_id)

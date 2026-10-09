@@ -34,11 +34,26 @@ class DetectorSettings(BaseModel):
     input_size: int = 640
     score_threshold: float = 0.5
     nms_threshold: float = 0.4
-    tile_size: int = 1280
+    tile_size: int = 640
+    """Tile edge in source-frame pixels.
+
+    Defaults to `input_size` so tiles are fed at 1:1 — a face is exactly as many
+    pixels to the detector as it has in the frame. That is the whole point of
+    tiling, and getting this wrong is the single most damaging config error:
+    a 4K frame tiled at 1280 runs at 0.5x, so a 20px face reaches the detector
+    as 10px and becomes undetectable.
+
+    Rule of thumb: set tile_size == input_size for 1080p and below. For 4K,
+    1280 (0.5x) is acceptable because faces are large in absolute pixels."""
+
     tile_overlap: float = 0.25
     """Raising this catches more seam-straddling faces at ~2.8x tile cost per
     0.25. Lower it to 0.125 first if a node is GPU-bound; the diagnostic is
-    `tile_count > 1` in the observation telemetry."""
+    `tile_count > 1` in the observation telemetry.
+
+    Note that overlap is proportionally more expensive on small frames: at
+    1080p/640 a 0.25 overlap processes 1.58x the frame's pixels, and at 720p
+    2.67x, because a 640px tile is a much larger fraction of the frame."""
 
     min_tile_size: int = 320
     """Tiles smaller than this are skipped. A face can only be detected if it
@@ -103,9 +118,24 @@ class CameraConfig(BaseModel):
     port: int = 554
     zone: str = "default"
     enabled: bool = True
-    width: int = 3840
-    height: int = 2160
-    target_fps: float = 8.0
+    width: int = 1920
+    height: int = 1080
+    target_fps: float = 12.0
+    """Analysis rate. Higher than 4K needs, because at 1080p the per-frame cost
+    is low and the frames are the thing that substitutes for face size: the
+    verifier needs 7 agreeing frames out of a 12-frame window, and a higher
+    rate gives a person more frames while crossing the detection zone."""
+
+    rotation: int = 0
+    """Clockwise degrees, 0/90/180/270. Set this whenever the camera is mounted
+    sideways or the image looks turned; a rotated face is detected and then
+    rejected by the roll gate, which presents as a camera that sees nobody."""
+    @field_validator("rotation")
+    @classmethod
+    def _valid_rotation(cls, v: int) -> int:
+        if v % 90 != 0:
+            raise ValueError(f"rotation must be a multiple of 90, got {v}")
+        return v % 360
     backend: DecodeBackend | None = None
     username_env: str | None = None
     """Name of the env var holding the camera password. Credentials are never
@@ -126,9 +156,17 @@ class CameraConfig(BaseModel):
 
     @property
     def url(self) -> str:
+        """RTSP URL, with userinfo only when a username is actually configured.
+
+        The `@` must be omitted entirely when there is no username. Emitting
+        `rtsp://@host:port/path` yields a URL with an empty userinfo section,
+        which is malformed — some decoders reject it outright, and the rest
+        handle it inconsistently. It surfaced as a camera that opened on one
+        run and refused the next, which is the hardest kind of bug to chase.
+        """
         user = os.environ.get(self.username_env, "") if self.username_env else ""
-        auth = f"{user}:" if user else ""
-        return f"rtsp://{auth}@{self.host}:{self.port}{self.rtsp_path}"
+        auth = f"{user}@" if user else ""
+        return f"rtsp://{auth}{self.host}:{self.port}{self.rtsp_path}"
 
     def to_stream_config(self, default_fps: float = 8.0) -> StreamConfig:
         return StreamConfig(
@@ -139,6 +177,7 @@ class CameraConfig(BaseModel):
             height=self.height,
             backend=self.backend or DecodeBackend.NVDEC,
             jpeg_quality=3,
+            rotation=self.rotation,
         )
 
 

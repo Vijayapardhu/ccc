@@ -11,9 +11,18 @@ detectors:
   input_size: 640
   score_threshold: 0.5
   nms_threshold: 0.4
-  tile_size: 1280
+
+  # 640 == input_size, so tiles reach the detector at 1:1 and a face is exactly
+  # as many pixels to the detector as it has in the frame. THIS IS THE MOST
+  # IMPORTANT SETTING IN THE FILE. At the 4K-oriented value of 1280, a 1080p
+  # frame runs at 0.5x, a 20px face arrives as 10px, and the camera silently
+  # detects almost nothing. Only raise it for 4K sources.
+  tile_size: 640
+
   # 0.25 -> ~28% of faces sit on a tile seam and are detected twice (deduped by
-  # NMS). Drop to 0.125 if a node is GPU-bound; watch `tile_count` telemetry.
+  # NMS). Proportionally costlier on small frames: 1.58x frame pixels at 1080p,
+  # 2.67x at 720p, because a 640px tile is a large fraction of those frames.
+  # Drop to 0.125 if a node is GPU-bound; watch `tile_count` telemetry.
   tile_overlap: 0.25
   min_tile_size: 320
 
@@ -43,11 +52,26 @@ worker:
 # Quality gate. Applied to every detection before embedding.
 # Raising min_face_px is the single most effective latency lever: it drops
 # the number of embeddings, which dominates GPU cost.
+#
+# min_face_px is MEASURED, not estimated. Same-photo queries at reduced
+# resolution against a real 358-student gallery:
+#
+#   actual face px     54     36     27     20    <20
+#   top-1 accuracy   100%   100%    80%    33%     0%   (nothing survives)
+#
+# 24 sits just under the knee. face_px ~= 250/d at 1080p, 167/d at 720p, so
+# this is ~10m at 1080p and ~7m at 720p. That range is short, and it is the
+# number to argue about when cameras are placed.
 quality:
   min_face_px: 24
   min_face_ratio: 0.015
   min_blur_score: 45.0
-  max_blur_score: 900.0
+  # Size-dependent: a clean in-focus face scores 2992 at 20px but only 143 at
+  # 400px, because a downscaled crop has more edge per pixel. An earlier bound
+  # of 900 sat below the 40px median of 1491 and rejected clean, in-focus
+  # long-range faces as "noise" — silently, since a rejected face looks
+  # exactly like an empty corridor.
+  max_blur_score: 6000.0
   max_yaw_deg: 45.0
   max_pitch_deg: 35.0
   max_roll_deg: 40.0

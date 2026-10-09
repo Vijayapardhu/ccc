@@ -8,9 +8,11 @@ purpose limitation, and erasure built into the data path rather than bolted on.
 
 **Read [ARCHITECTURE.md](ARCHITECTURE.md) first.** It contains the sizing math,
 the tiering recommendation, and the failure modes. The short version: the design
-is organised around one fact — a 4K frame of 200 people does not contain enough
-pixels to identify them, so the system crops instead of resizing, never trusts a
-single frame, and does not run biometrics on cameras that do not need them.
+is organised around one fact — **face size is the binding constraint**, and at
+1080p/720p it falls below what ArcFace can use beyond ~12m / ~8m. So the system
+crops instead of resizing, never trusts a single frame, spends its compute
+headroom on frame rate rather than on resolution, and does not run biometrics on
+cameras that do not need them.
 
 ---
 
@@ -86,9 +88,9 @@ docker compose -f deploy/docker-compose.gpu.yml up -d
 ## The pipeline
 
 ```
-4K frame
+1080p frame
    -> motion gate
-   -> tile plan (8 tiles @ 1280px, 25% overlap)   crop, never resize
+   -> tile plan (8 tiles @ 640px, 25% overlap, 1:1)  crop, never resize
    -> SCRFD 2.5G, one batched pass over live tiles
    -> NMS merge into frame coordinates
    -> quality gate (size/blur/pose/illumination)  drops ~70-85%

@@ -69,6 +69,20 @@ class StreamConfig:
     of stale frames is worse than a gap: it inflates latency and every frame
     in it is stale evidence for a moving person."""
 
+    rotation: int = 0
+    """Clockwise rotation in degrees: 0, 90, 180 or 270.
+
+    Required for any camera whose sensor is mounted sideways. Both bench
+    cameras deliver portrait containers holding landscape content, so their
+    faces arrive rotated ~90 degrees. SCRFD still finds them — it is trained to
+    be rotation-tolerant — and then the quality gate correctly rejects every
+    one of them on `roll`, which looks exactly like "the camera sees nobody".
+
+    That is the worst possible failure mode: detection reports faces, nothing
+    errors, and the answer is silently always wrong. So rotation is applied at
+    ingest, before the detector, and the only correct value is whichever one
+    the content actually needs."""
+
 
 @dataclass(slots=True)
 class Frame:
@@ -190,6 +204,7 @@ class FrameSource:
                     if image is None:
                         break
 
+                    image = _apply_rotation(image, self.config.rotation)
                     seq += 1
                     h, w = image.shape[:2]
                     self.health.frames_seen += 1
@@ -322,6 +337,21 @@ class FrameSource:
             text = line.decode("utf-8", "replace").strip()
             if text:
                 self.health.last_error = text[:500]
+
+
+def _apply_rotation(image: npt.NDArray[np.uint8], degrees: int) -> npt.NDArray[np.uint8]:
+    """Rotate clockwise by 0/90/180/270, returning a contiguous array.
+
+    `np.rot90` is counter-clockwise and returns a view with swapped strides,
+    which OpenCV and ONNX both reject downstream. Both are fixed here rather
+    than at each call site.
+    """
+    if degrees % 360 == 0:
+        return image
+    k = {90: 3, 180: 2, 270: 1}.get(degrees % 360)
+    if k is None:
+        raise ValueError(f"rotation must be 0, 90, 180 or 270, got {degrees}")
+    return np.ascontiguousarray(np.rot90(image, k))
 
 
 def _no_window() -> int:

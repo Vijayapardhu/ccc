@@ -18,9 +18,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# Model weights: ~500MB of binaries, and InsightFace's licensing is not ours
-# to redistribute. Fetched by deploy/fetch-models.sh.
-models/
+# Model weights at repo root: ~500MB of binaries, and InsightFace's licensing is not ours
+# to redistribute. Fetched by deploy/fetch-models.sh. Rooted so src/campus/models/
+# (the SCRFD/ArcFace wrappers) stays tracked.
+/models/
 
 # Deployment secrets — camera passwords and the API key never enter the repo.
 deploy/secrets/

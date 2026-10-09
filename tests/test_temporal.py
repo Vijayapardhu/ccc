@@ -134,15 +134,116 @@ class TestStability:
         assert commit is not None
         assert commit.student_id == "S1001"
 
-    def test_reported_identity_during_sticky_period(self):
+    def test_commitment_survives_bad_frames_in_the_record(self):
+        """A person walking the length of a corridor passes through blur and
+        occlusion. The *commit* must survive that, or attendance flickers."""
         v = TemporalVerifier()
         feed(v, n=8)
+        for i in range(8):
+            v.observe(
+                TrackId("cam-1-0"), CameraId("c"),
+                candidates([("S7777", 0.20), ("S1001", 0.10)]),
+                1000.0 + (8 + i) * 0.125,
+            )
+        commit = v.commit(TrackId("cam-1-0"))
+        assert commit is not None
+        assert commit.student_id == "S1001"
+
+    def test_single_bad_frame_stays_sticky(self):
+        """One bad frame is a bad frame, not a dispute.
+
+        If it were treated as one, the flicker that stickiness exists to
+        prevent would come straight back, just wearing a different label.
+        """
+        v = TemporalVerifier()
+        feed(v, n=10)
         outcome, sid, _, _ = v.observe(
             TrackId("cam-1-0"), CameraId("c"),
-            candidates([("S7777", 0.20), ("S1001", 0.10)]), 1001.2,
+            candidates([("S7777", 0.20), ("S1001", 0.10)]), 1000.0 + 10 * 0.125,
         )
         assert outcome is ObservationOutcome.IDENTIFIED
         assert sid == "S1001"
+
+    def test_sustained_disagreement_is_contested(self):
+        """The observed failure this replaces.
+
+        A track committed while the subject faced the camera; the evidence then
+        favoured a different person frame after frame — usually because the
+        subject turned away and now matches nobody. The challenger is far too
+        weak to overturn, so the old behaviour re-asserted the standing
+        identity as if it were current. Displaying a stale name as a confident
+        identity is how a false attendance record gets attached to a real
+        student, so the honest outcome is that the evidence disagrees.
+        """
+        v = TemporalVerifier()
+        feed(v, n=10)
+        for i in range(4):
+            outcome, sid, score, _ = v.observe(
+                TrackId("cam-1-0"), CameraId("c"),
+                candidates([("S7777", 0.23), ("S1001", 0.10)]),
+                1000.0 + (10 + i) * 0.125,
+            )
+        assert outcome is ObservationOutcome.CONTESTED
+        assert sid == "S1001", "the commitment is still what an event would carry"
+        assert score == pytest.approx(0.23, abs=0.01)
+        assert v.commit(TrackId("cam-1-0")) is not None
+
+    def test_inconsistent_challenger_does_not_contest(self):
+        """Noise, not disagreement. A challenger that cannot agree with itself
+        across frames is a bad crop, and sticking is the right call."""
+        v = TemporalVerifier()
+        feed(v, n=10)
+        for i in range(5):
+            v.observe(
+                TrackId("cam-1-0"), CameraId("c"),
+                candidates([(f"S77{i:02d}", 0.30), ("S1001", 0.10)]),
+                1000.0 + (10 + i) * 0.125,
+            )
+        outcome, sid, _, _ = v.observe(
+            TrackId("cam-1-0"), CameraId("c"),
+            consistent_candidates("S1001", 0.55, "S7777", 0.20), 1000.0 + 16 * 0.125,
+        )
+        assert outcome is ObservationOutcome.IDENTIFIED
+        assert sid == "S1001"
+
+    def test_agreeing_frames_are_not_contested(self):
+        v = TemporalVerifier()
+        feed(v, n=10)
+        outcome, sid, _, _ = v.observe(
+            TrackId("cam-1-0"), CameraId("c"),
+            consistent_candidates("S1001", 0.50, "S9999", 0.20), 1001.2,
+        )
+        assert outcome is ObservationOutcome.IDENTIFIED
+        assert sid == "S1001"
+
+    def test_stale_track_is_not_contested(self):
+        """A track that has gone quiet is quiet, not disputed.
+
+        The gap is deliberately between `min_gap_s` (1.0s) and `max_gap_s`
+        (2.5s): long enough that the current evidence is not "live", short
+        enough that the track has not been recycled onto a different person.
+        Past `max_gap_s` the window resets instead, which is a separate and
+        correct behaviour.
+        """
+        v = TemporalVerifier()
+        feed(v, n=10)
+        outcome, _, _, _ = v.observe(
+            TrackId("cam-1-0"), CameraId("c"),
+            candidates([("S7777", 0.30), ("S1001", 0.10)]), 1000.0 + 1.5,
+        )
+        assert outcome is ObservationOutcome.IDENTIFIED
+
+    def test_very_long_gap_resets_the_track_entirely(self):
+        """Past `max_gap_s` the track id is treated as a different person."""
+        v = TemporalVerifier()
+        feed(v, n=10)
+        outcome, sid, _, _ = v.observe(
+            TrackId("cam-1-0"), CameraId("c"),
+            candidates([("S7777", 0.30), ("S1001", 0.10)]), 1000.0 + 600.0,
+        )
+        assert outcome is ObservationOutcome.UNKNOWN
+        assert sid is None
+        assert v.commit(TrackId("cam-1-0")) is None, "stale commitment survived"
 
     def test_sustained_strong_rival_overturns(self):
         """An identity switch is rare but real (a group splitting up). When it

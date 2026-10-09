@@ -74,6 +74,22 @@ class ObservationOutcome(StrEnum):
     correction, and a duplicated attendance record is worse than one that is
     slightly stale."""
 
+    CONTESTED = "contested"
+    """The standing commitment and the current best evidence disagree.
+
+    Neither identity is asserted. The track still has a commitment, and it is
+    still what a presence event would carry, but the live read is a
+    disagreement rather than a fact.
+
+    This exists because of an observed failure: a track committed to a student
+    while they were facing the camera, then the current frame — with the person
+    turned away, matching *nobody* — contradicted it. The challenger was far
+    too weak to justify an overturn, so the sticky path reported the old
+    identity as if it were current. A stale name displayed as a confident
+    identity is exactly the failure that produces a false attendance record
+    against a named student, so the honest report is that the evidence
+    disagrees, not that either side is right."""
+
 
 @dataclass(frozen=True, slots=True)
 class FaceBox:

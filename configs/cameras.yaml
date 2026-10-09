@@ -7,6 +7,20 @@
 #
 # Generate this from the NVRM/camera list, not by hand — 400 hand-typed
 # entries will contain a typo in a stream path, and that camera will be dark.
+#
+# RESOLUTION MATTERS MORE THAN ANY OTHER FIELD HERE. Face size scales with
+# resolution, and face size is the binding constraint on accuracy:
+#
+#   face_px ~= 250 / distance_m   at 1080p
+#   face_px ~= 167 / distance_m   at 720p     (~75 deg HFOV, 0.20m face height)
+#
+#   1080p:  5m -> 50px  10m -> 25px  15m -> 17px (marginal)
+#   720p:   5m -> 33px   8m -> 21px  12m -> 14px (unreliable)
+#
+# A 720p camera cannot cover the same ground as a 1080p one. Below ~14px no
+# threshold rescues the match rate — the camera has to move closer or get a
+# longer lens. Check the depth of the area each camera is meant to cover
+# against the table above before accepting it into the inventory.
 
 cameras:
   - id: gate-main-n
@@ -14,49 +28,82 @@ cameras:
     host: 10.20.0.11
     zone: default
     rtsp_path: /Streaming/Channels/101
-    target_fps: 8.0
+    width: 1920
+    height: 1080
+    target_fps: 12.0
     username_env: CAM_MAIN_N_PASS
 
   - id: gate-main-s
     name: Main gate south
     host: 10.20.0.12
     zone: default
+    rtsp_path: /Streaming/Channels/101
+    width: 1280
+    height: 720
+    # 720p gate. The approach is narrow and people come close, so 720p is
+    # adequate here — but the detection zone is genuinely short (~8m) and the
+    # gate must not be relied on for counting people further out.
+    target_fps: 12.0
+    overrides:
+      min_face_px: 18
     username_env: CAM_MAIN_S_PASS
 
   - id: lib-reading
     name: Library reading room
     host: 10.20.1.40
     zone: library
-    # A reading room is quiet and well-lit and mostly still. Lower the frame
-    # rate and raise the size floor: nothing here benefits from 8fps and the
-    # distant faces fail anyway.
-    target_fps: 4.0
+    width: 1920
+    height: 1080
+    # A reading room is quiet, well-lit and mostly still. Lower the frame rate
+    # and raise the size floor: nothing here benefits from 12fps, and the
+    # seated faces are close and sharp so a strict gate costs nothing.
+    target_fps: 6.0
     overrides:
-      min_face_px: 32
+      min_face_px: 28
     username_env: CAM_LIB_READING_PASS
 
   - id: corridor-c-block
     name: C block corridor
     host: 10.20.2.15
     zone: corridor
-    target_fps: 8.0
+    width: 1920
+    height: 1080
+    # The hardest case. A long corridor means people are far away and small, and
+    # the far end contributes nothing useful: at 20m a 1080p face is 12px.
+    # Accept a lower floor here or the far half of the corridor silently
+    # reports nobody, which reads as "empty corridor" rather than as a
+    # failure. Also loosen the margin — fewer faces means noisier scores.
+    target_fps: 12.0
     overrides:
-      # Corridor cameras see people at the end of a long run. Accept smaller
-      # faces here than elsewhere or the far end of the corridor contributes
-      # nothing to attendance.
-      min_face_px: 18
-      min_margin: 0.05
+      min_face_px: 15
     username_env: CAM_CORRIDOR_PASS
+
+  - id: corridor-d-block
+    name: D block corridor
+    host: 10.20.2.16
+    zone: corridor
+    width: 1280
+    height: 720
+    # Documented limitation, stated rather than hidden: 720p at 15px is ~10m.
+    # Beyond that this camera is motion-only, and should be treated as such
+    # in the tiering plan rather than being counted as an identity camera.
+    target_fps: 12.0
+    overrides:
+      min_face_px: 13
+    username_env: CAM_CORRIDOR_D_PASS
 
   - id: canteen-hall
     name: Canteen hall
     host: 10.20.3.8
     zone: default
-    # The hardest case on campus: 200+ people, heavy occlusion, mixed lighting.
-    # 12fps because people cross the frame quickly and a lower rate loses the
-    # track before the verifier has enough frames to commit.
-    target_fps: 12.0
+    width: 1920
+    height: 1080
+    # 200+ people, heavy occlusion, mixed lighting, and they cross the frame
+    # fast. 15fps because a person can clear the detection zone in under two
+    # seconds at 12fps, and the verifier needs 7 agreeing frames. A lower rate
+    # loses the track before it has enough evidence to commit.
+    target_fps: 15.0
     overrides:
-      min_face_px: 20
+      min_face_px: 18
       max_occlusion_ratio: 0.55
     username_env: CAM_CANTEEN_PASS

@@ -6,25 +6,66 @@ Student presence tracking across 400+ campus cameras.
 
 ## The problem, stated honestly
 
-400 cameras at 4K. The naive reading of "run face recognition on 400 cameras"
-is 400 streams of detection against a 50,000-student database, and it does not
-work — not because the models are slow, but because **a 4K frame of 200 people
-does not contain enough pixels to identify them**.
+400 cameras. The naive reading of "run face recognition on 400 cameras" is 400
+streams of detection against a 50,000-student database, and it does not work —
+not because the models are slow, but because **at the real resolutions, there
+is not enough information in the pixels to identify people at range**.
 
-At 3840x2160 with 200 people, the median face is 30-60px. Downscale the frame
-to a detector's training resolution and that becomes 5-10px, which is below
-SCRFD's floor and below what ArcFace can embed. The information is simply not
-there. No model recovers it.
+The campus fleet is 1080p and 720p. Face size scales with resolution, and face
+size is the binding constraint on everything:
 
-So the architecture below is organised around three facts that follow from
-that, and almost every design decision traces back to one of them:
+```
+face_px  ~=  250 / distance_metres    at 1080p
+face_px  ~=  167 / distance_metres    at 720p
+```
 
-1. **Crop, don't resize.** Tiled detection preserves native pixels.
+(~75° HFOV, 0.20m face height. A narrower lens extends the range
+proportionally.)
+
+Measured on the real 391-photo enrollment set, against a real 358-student
+gallery — same photo downscaled, then back through the whole chain
+(detect → gate → align → embed → search):
+
+| Actual face px | 54 | 36 | 27 | 20 | <20 |
+| --- | --- | --- | --- | --- | --- |
+| Top-1 accuracy | 100% | 100% | 80% | 33% | 0% — nothing survives detection |
+
+| Distance | 1080p | 720p | Verdict |
+| --- | --- | --- | --- |
+| 4m | 62px | 42px | reliable |
+| 6m | 42px | 28px | reliable / usable |
+| 8m | 31px | 21px | usable / marginal |
+| 10m | 25px | 17px | marginal / unreliable |
+| 12m | 21px | 14px | unreliable |
+| 15m | 17px | 11px | unreliable |
+
+**A 720p camera cannot cover what a 1080p one does**, and with
+`min_face_px = 24` the useful range is roughly **10m at 1080p and 7m at 720p**.
+Below ~20px no threshold rescues the match rate — the camera has to move
+closer or take a longer lens. That is a placement decision, not a tuning
+decision, and it belongs in the camera inventory review.
+
+**These are upper bounds.** The query and the gallery entry came from the same
+frontal studio photo, so only resolution and JPEG varied; real sightings differ
+in pose, expression and illumination, and the real gallery is 50,000 students
+rather than 358. Treat the table as the best case and **measure on real
+footage before quoting any accuracy to the university.**
+
+Three consequences shape the design:
+
+1. **Crop, don't resize.** Tiled detection preserves native pixels. This matters
+   more at 1080p/720p than at 4K, because a 1280px tile on a 1080p frame is a
+   0.5x downscale — precisely the lossy path the whole design exists to avoid.
 2. **Never trust one frame.** At these face sizes the correct answer and a
    confident wrong answer overlap in score. Commit only on agreement over time.
-3. **Not every camera needs biometrics.** This is the recommendation that
-   matters most, and it is a *scope* decision, not a technical one — see
-   [Tiering](#tiering-the-fleet-the-decision-that-actually-matters).
+   And since per-frame compute is now cheap, **spend the headroom on frame
+   rate** — 12–15fps instead of 8 — because frames are what substitute for
+   pixels.
+3. **Not every camera needs biometrics.** See
+   [Tiering](#tiering-the-fleet-the-decision-that-actually-matters). This is
+   now *more* true, not less: the 720p cameras at the edge of campus cannot
+   identify anyone usefully, and pretending otherwise buys a dashboard that
+   reports confident nonsense.
 
 ---
 
@@ -81,11 +122,11 @@ missing attendance with no error anywhere, whereas a refused write surfaces in
 ## The per-frame pipeline
 
 ```
-4K frame
+1080p frame  (1920x1080; 720p is 6 tiles)
    │
    ├─▶ motion gate ──── skip tiles with no change since last frame
    │
-   ├─▶ tile plan ────── 4x2 = 8 tiles @ 1280px, 25% overlap
+   ├─▶ tile plan ────── 4x2 = 8 tiles @ 640px, 25% overlap, 1:1 scale
    │
    ├─▶ SCRFD 2.5G ───── one batched forward pass over all live tiles
    │                   NMS merge into frame coordinates
@@ -106,19 +147,41 @@ missing attendance with no error anywhere, whereas a refused write surfaces in
 
 ### 1. Tiling (`campus/imaging/tiling.py`)
 
-Tiles are 1280px from a 3840x2160 frame at 25% overlap → stride 960 → **8
-tiles**, 7.1M pixels of work against 8.3M for the frame itself. The point is
-not throughput, it is resolution: a 40px face is still 40px in its tile.
+**`tile_size` must equal `input_size` (640) at 1080p and below**, so tiles reach
+the detector at 1:1 and a face is exactly as many pixels to the detector as it
+has in the frame.
 
-Overlap costs ~2.8x versus a non-overlapping grid. That is worth it, because
-without it every face straddling a tile boundary is missed, and a missed face
-is an attendance record that silently omits a student. `merge_tile_detections`
-reports how many raw detections each survivor absorbed; a survivor absorbing
-duplicates is a face on a seam, so **rising `tile_count` telemetry means the
-overlap is too small**.
+| Source | tile_size | Tiles | Scale | Detector px/frame | vs frame |
+| --- | --- | --- | --- | --- | --- |
+| 1080p | 640 | 8 | **1.00** | 3.28M | 1.58x |
+| 1080p | 1280 | 2 | 0.50 | 0.82M | 0.40x |
+| 720p | 640 | 6 | **1.00** | 2.46M | 2.67x |
+| 4K | 1280 | 8 | 0.50 | 3.28M | 0.40x |
+| 4K | 640 | 40 | 1.00 | 16.4M | 1.98x |
 
-`assert tiles cover every pixel` is a test, not a comment. A gap in the grid is
-invisible on any dashboard and looks exactly like an empty corridor.
+Two things fall out of this table:
+
+**The 4K-era default of 1280 is actively harmful here.** On a 1080p frame it
+runs at 0.5x, a 20px face arrives as 10px, and the camera reports an empty
+corridor rather than raising an error. The defaults are now 640.
+
+**Tiling at native scale makes compute nearly resolution-independent.** 1080p
+and 4K both cost ~3.3M detector pixels per frame; what differs is *decode*,
+not inference. So the GPU story barely moves, while the NVDEC constraint —
+which was the binding one — eases substantially at 1080p.
+
+Note the overlap cost is *proportionally* worse on small frames: 1.58x at
+1080p, 2.67x at 720p, because a 640px tile is a much larger fraction of those
+frames. Drop `tile_overlap` to 0.125 before buying hardware for a 720p-heavy
+fleet.
+
+`merge_tile_detections` reports how many raw detections each survivor absorbed;
+a survivor absorbing duplicates is a face on a seam, so **rising `tile_count`
+telemetry means the overlap is too small**.
+
+`assert tiles cover every pixel` is a test, not a comment, and it now runs for
+1080p and 720p as well. A gap in the grid is invisible on any dashboard and
+looks exactly like an empty corridor.
 
 ### 2. Quality gate (`campus/imaging/quality.py`)
 
@@ -131,7 +194,7 @@ Checks run cheapest-first, because a 12px face fails everything else anyway:
 
 | Check | Threshold | Why |
 | --- | --- | --- |
-| `min_face_px` | 24 | Below this, embeddings are noise |
+| `min_face_px` | 20 | Below this, embeddings are noise. Sets the ~12.5m (1080p) / ~8.3m (720p) range limit |
 | `min_face_ratio` | 0.015 | Rejects false positives on distant clutter |
 | blur | 45-900 variance of Laplacian | Low = motion smear, high = noise amplification |
 | brightness | 25-235 | Under/over-exposed faces carry no identity |
@@ -139,9 +202,14 @@ Checks run cheapest-first, because a 12px face fails everything else anyway:
 | yaw / pitch / roll | 45° / 35° / 40° | A profile view is unrecoverable at any size |
 
 `min_face_px` is the single most effective latency lever, because the number of
-embeddings dominates GPU cost. It is also the one to lower on a corridor and
-raise in a library — per-camera `overrides` exist for exactly that, and
-`configs/cameras.yaml` demonstrates both directions.
+embeddings dominates GPU cost. It is also the setting that quietly caps your
+coverage, and it is **per-camera**. `configs/cameras.yaml` sets it from 15
+(a long 1080p corridor, accepting a short range) to 28 (a quiet library
+reading room, where faces are close and sharp and a strict gate costs nothing).
+
+Getting this wrong is quiet in a specific way: too high and the far end of a
+corridor reports *nobody*, which looks identical to an empty corridor. It will
+not raise an error.
 
 Pose is estimated from landmark geometry, not PnP: fast enough to run on every
 detection, needs no camera calibration, and accurate enough to answer the only
@@ -169,7 +237,7 @@ numbers rather than an error:
 ### 4. Tracking (`campus/track/bytetrack.py`)
 
 Tracking is what turns a low-quality single-frame problem into a
-high-confidence multi-frame one. Without it, a face at the edge of a 4K frame
+high-confidence multi-frame one. Without it, a face at the far end of a corridor
 is recognised once, badly, and maybe not at all.
 
 ByteTrack's contribution over plain IoU tracking is the **second association
@@ -181,7 +249,7 @@ ever commit an identity. So `low_threshold` matters more than
 `high_threshold` here.
 
 Constant-velocity prediction rather than a Kalman filter: at 400 cameras x 200
-faces x 8fps, several microseconds per track per frame is real, and for faces
+faces x 12fps, several microseconds per track per frame is real, and for faces
 with irregular motion the accuracy gain does not pay for it.
 
 `active()` (seen this frame) and `live()` (not yet removed) are deliberately
@@ -296,38 +364,48 @@ you who was in it an hour later.
 If the university genuinely needs all 400, budget the fleet as below — but know
 that the NVDEC session limit binds before the GPU does.
 
-### GPU sizing, 400 cameras, all with biometrics
+### GPU sizing, 400 cameras
 
-Derived from the pipeline above. **These are estimates; `campus bench` against
-your own footage is the only number that counts.**
+Derived from the pipeline above, at the real resolutions. **These are
+estimates; `campus bench` against your own footage is the only number that
+counts.**
 
 ```
-tier-1:  100 cams x 8 fps x 8 tiles          =  6,400 tile-detections/sec
-all-400: 400 cams x 8 fps x 8 tiles          = 25,600 tile-detections/sec
-         (+~10% for the busy cameras at 12 fps)
+tier-1, mixed fleet 100 cams:  60 x 1080p x 8 tiles x 12fps =  5,760 det/s
+                               40 x  720p x 6 tiles x 12fps =  2,880 det/s
+                                                    total  =  8,640 det/s
+                                                        x ~50% motion gate
+                                                            =  ~4,300 det/s
 
-with ~50% motion-gating savings on top          => ~12,800 effective
+all-400, mixed fleet:          250 x 1080p + 150 x 720p x 12fps
+                                                     ≈ 40,000 det/s
+                                                        x ~50% motion gate
+                                                            = ~20,000 det/s
 ```
 
-| Stage | Cost per unit | All-400 effective | Note |
+| Stage | Cost per unit | Tier-1 (100) | All-400 |
 | --- | --- | --- | --- |
-| SCRFD 2.5G @640² | 2.5 GFLOP | ~32 TFLOPS | ~1200 img/s per L40S measured, not computed |
-| ArcFace r50 @112² | 0.6 GFLOP/face | ~29 TFLOPS | face count gated by the quality filter |
-| FAISS search | 2.4 TFLOP/s | negligible | only on GPU; CPU is 3 orders short |
-| **NVDEC decode** | — | **400 sessions** | **usually the binding constraint** |
+| SCRFD 2.5G @640² | 2.5 GFLOP | ~11 TFLOPS | ~50 TFLOPS |
+| ArcFace r50 @112² | 0.6 GFLOP/face | ~10 TFLOPS | ~45 TFLOPS |
+| FAISS search | — | negligible | negligible (GPU only) |
+| **NVDEC decode** | — | **100 sessions** | **400 sessions** |
 
 Measured, not derived, on a single L40S: roughly **1200 SCRFD/s and 4000
-ArcFace/s** at these resolutions with TensorRT FP16 and real batching. That
-puts all-400 at **~20 L40S-equivalents**; tiered at 100 cameras, **3-6**.
+ArcFace/s** with TensorRT FP16 and real batching. That puts tier-1 at
+**~3 L40S-equivalents** and all-400 at **~15–20**.
 
-The decode row is the one that surprises people. 400 concurrent 4K H.265
-streams is a session-count limit on the decoder engines, and it is reached
-before the tensor cores are anywhere near saturation. **Check the NVDEC session
-limit for your chosen GPU before buying anything.**
+**What 1080p actually bought you.** Inference cost is essentially unchanged —
+tiling at native scale means the detector sees the same pixel budget at any
+resolution. What improved is the constraint that was *actually* binding:
+1080p/720p H.265 decode is far cheaper in NVDEC sessions than 4K, and session
+availability is what usually gates a fleet before the GPU does. Verify the
+session limit for your chosen GPU, but this moves in your favour.
 
-Per-node target is 32 cameras at 70% planned utilisation, so a canteen
-surge does not push a node into latency collapse. One process per GPU: two
-processes sharing a device halve the model workspace and defeat batching.
+**What it did not buy you: accuracy.** Face pixels halved. That is why the
+recommendation to spend the headroom on frame rate matters — 12–15fps instead
+of 8 gives the temporal verifier more frames per person crossing the zone, and
+frames are the cheapest substitute for pixels. It partly, not fully, offsets
+the loss.
 
 ### Measure before you buy
 
@@ -337,8 +415,9 @@ campus bench footage/canteen-1200.mkv --frames 200
 
 `bench` reports per-frame detect/embed latency and
 `sustainable_cameras_per_node`. Run it on footage from **each camera
-archetype** — canteen, corridor, gate, library. A campus average is a number
-that describes no camera you actually have.
+archetype** — canteen, corridor, gate, library — and on both resolutions. A
+campus average describes no camera you actually have, and a 720p average
+describes neither of your 1080p ones.
 
 ---
 
@@ -356,7 +435,7 @@ erasure_log
 Decisions worth defending:
 
 - **`presence_events` is partitioned monthly on `first_seen`.** At 400 cameras
-  x 8fps this grows fast, and a single unpartitioned table makes every
+  x 12fps this grows fast, and a single unpartitioned table makes every
   retention job a full scan. Partitions make retention `DROP TABLE` — instant
   and provably complete, which matters when the retention period is a legal
   commitment.
@@ -428,21 +507,34 @@ no error anywhere. Hence `noeviction`.
 
 In priority order, for the same reason each one is first:
 
-1. **Get real footage and run `campus bench` on it.** Every number above is an
-   estimate until it is not. Also the only way to learn your actual face-size
-   distribution, which sets `min_face_px`.
-2. **Run the enrollment station for a cohort of 50-100 students.** Gallery
+1. **Audit the camera inventory against the face-size table.** For every camera,
+   measure the depth of the area it is meant to cover and check it against
+   `face_px ~= 250/d` (1080p) or `167/d` (720p). Any 720p camera covering more
+   than ~8m, or 1080p beyond ~12m, cannot identify anybody usefully and should
+   be tiered down to motion-only or re-aimed. This is a placement review, not
+   a config change, and it is the highest-value hour in the whole project —
+   it is the difference between a camera that works and one that confidently
+   reports nobody.
+2. **Get real footage and run `campus bench` on it**, per camera archetype and
+   per resolution. Every number above is an estimate until it is not. Also the
+   only way to learn your actual face-size distribution, which sets
+   `min_face_px` per camera.
+3. **Run the enrollment station for a cohort of 50-100 students.** Gallery
    quality is the ceiling on everything downstream, and a bad ID-card photo
    becomes a permanent false-match source across all 400 cameras. Front / left
    / right roughly halves the false-match rate versus a single card photo.
-3. **Measure the false-match rate before tuning thresholds.** Run the pipeline
+4. **Measure the false-match rate before tuning thresholds.** Run the pipeline
    over footage you have ground truth for, and count wrong attributions. Do not
    tune `min_margin` before you know your error rate — the thresholds are only
    interpretable against a measured baseline.
-4. **Cross-camera visit linking.** Deliberately out of scope here. Tracks are
+5. **Cross-camera visit linking.** Deliberately out of scope here. Tracks are
    camera-scoped; linking a person across cameras needs its own design and a
    different error budget.
-5. **Camera handover / re-identification.** Same reason.
+6. **Camera handover / re-identification.** Same reason.
 
-The one thing not to do: tune thresholds on synthetic data. `tests/` proves the
-logic is correct; it proves nothing about accuracy on your campus.
+Two things not to do. Don't tune thresholds on synthetic data — `tests/` proves
+the logic is correct and proves nothing about accuracy on your campus. And
+don't compensate for short faces by lowering `min_face_px` further: a 14px face
+embeds into a vector that will produce confident wrong answers, and the
+temporal verifier will then commit that wrong answer with *more* confidence
+because it is consistent across frames. Consistency is not correctness.
